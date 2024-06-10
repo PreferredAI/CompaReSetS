@@ -23,7 +23,9 @@ def parse_arguments():
         default="data/cellphone/also_bought.txt",
         help="Input item sequences, each line contains 'target_item,item1,item2,...'",
     )
-    parser.add_argument("-s", "--sentiment_path", type=str, default=None, help="Sentiment path")
+    parser.add_argument(
+        "-s", "--sentiment_path", type=str, default=None, help="Sentiment path"
+    )
     parser.add_argument(
         "-is",
         "--initial_selection_dir",
@@ -60,6 +62,16 @@ def parse_arguments():
         help="Ouput path",
     )
     parser.add_argument(
+        "-ot",
+        "--opinion_type",
+        choices=[
+            "binary",
+            "polarity",
+            "scale",
+        ],
+        default="binary",
+    )
+    parser.add_argument(
         "-a",
         "--algorithm",
         choices=[
@@ -80,10 +92,12 @@ def parse_arguments():
         "--ld",
         type=float,
         default=1.0,
-        help="Traceoff factor of aspect distance and opinion distance",
+        help="Tradeoff factor of aspect distance and opinion distance",
     )
-    parser.add_argument("-mu", "--mu", type=float, default=1.0)
-    parser.add_argument("-rs", "--random_seed", type=int, default=123, help="Random seed value")
+    parser.add_argument("-mu", "--mu", type=float, default=0.1)
+    parser.add_argument(
+        "-rs", "--random_seed", type=int, default=123, help="Random seed value"
+    )
     parser.add_argument("--skip_exists", action="store_true")
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -127,7 +141,9 @@ def read_sentiment(sentiment_path):
             tokens = l.strip().split(",")
             reviewer, item, sentiment_tup = tokens[0], tokens[1], tokens[2:]
             item_sentiments = sentiment.setdefault(item, {})
-            item_sentiments[reviewer] = [(tup.split(":")[0], float(tup.split(":")[2])) for tup in sentiment_tup]
+            item_sentiments[reviewer] = [
+                (tup.split(":")[0], float(tup.split(":")[2])) for tup in sentiment_tup
+            ]
 
     return sentiment
 
@@ -143,11 +159,19 @@ def read_selection(selection_path):
 
 
 def get_item_aspects(sentiment, item):
-    return [aspect for _, aspect_sentiments in sentiment.get(item, {}).items() for aspect, _ in iter(aspect_sentiments)]
+    return [
+        aspect
+        for _, aspect_sentiments in sentiment.get(item, {}).items()
+        for aspect, _ in iter(aspect_sentiments)
+    ]
 
 
 def get_item_aspect_sentiments(sentiment, item):
-    return [(aspect, score) for _, aspect_sentiments in sentiment.get(item, {}).items() for aspect, score in iter(aspect_sentiments)]
+    return [
+        (aspect, score)
+        for _, aspect_sentiments in sentiment.get(item, {}).items()
+        for aspect, score in iter(aspect_sentiments)
+    ]
 
 
 def get_aspects(sentiment, item, user, aspects=[]):
@@ -173,24 +197,50 @@ def get_aspect_id_map(sentiment, items):
     return aspect_id_map
 
 
-def get_aspect_opinion_vectors(aspect_id_map, aspect_sentiments):
+def get_aspect_opinion_vectors(aspect_id_map, aspect_sentiments, opinion_type="binary"):
     aspect_vector = np.zeros((len(aspect_id_map)), dtype=(np.float64))
-    opinion_vector = np.zeros((2 * len(aspect_id_map)), dtype=(np.float64))
-    for aspect, score in aspect_sentiments:
-        if score > 0:
-            opinion_vector[2 * aspect_id_map[aspect]] += score
-        elif score < 0:
-            opinion_vector[2 * aspect_id_map[aspect] + 1] += score
-        aspect_vector[aspect_id_map[aspect]] += 1
-
-    scale_factor = max(np.max(aspect_vector), 1)
-    opinion_vector = opinion_vector / scale_factor
-    aspect_vector = aspect_vector / scale_factor
+    if opinion_type == "binary":  # positive, negative
+        opinion_vector = np.zeros((2 * len(aspect_id_map)), dtype=(np.float64))
+        for aspect, score in aspect_sentiments:
+            if score > 0:
+                opinion_vector[2 * aspect_id_map[aspect]] += score
+            elif score < 0:
+                opinion_vector[2 * aspect_id_map[aspect] + 1] += score
+            aspect_vector[aspect_id_map[aspect]] += 1
+        scale_factor = max(np.max(aspect_vector), 1)
+        opinion_vector = opinion_vector / scale_factor
+        aspect_vector = aspect_vector / scale_factor
+    elif opinion_type == "polarity":  # positive, negative, neutral
+        opinion_vector = np.zeros((3 * len(aspect_id_map)), dtype=(np.float64))
+        for aspect, score in aspect_sentiments:
+            if score > 0:
+                opinion_vector[3 * aspect_id_map[aspect]] += score
+            elif score < 0:
+                opinion_vector[3 * aspect_id_map[aspect] + 1] += score
+            else:
+                opinion_vector[3 * aspect_id_map[aspect] + 2] += score
+            aspect_vector[aspect_id_map[aspect]] += 1
+        scale_factor = max(np.max(aspect_vector), 1)
+        opinion_vector = opinion_vector / scale_factor
+        aspect_vector = aspect_vector / scale_factor
+    elif opinion_type == "scale":  # opinion = sigmoid(total_sentiment)
+        opinion_vector = np.zeros((len(aspect_id_map)), dtype=(np.float64))
+        aggregated_sentiments = {}
+        for aspect, score in aspect_sentiments:
+            aggregated_sentiments.setdefault(aspect, 0)
+            aggregated_sentiments[aspect] += score
+            aspect_vector[aspect_id_map[aspect]] += 1
+        for aspect, total_sentiment in aggregated_sentiments.items():
+            opinion_vector[aspect_id_map[aspect]] = 1.0 / (1 + np.exp(-total_sentiment))
+        scale_factor = max(np.max(aspect_vector), 1)
+        aspect_vector = aspect_vector / scale_factor
     return (aspect_vector, opinion_vector)
 
 
 def distance(a, b):
-    return ((np.array(a, dtype=(np.float64)) - np.array(b, dtype=(np.float64))) ** 2).sum()
+    return (
+        (np.array(a, dtype=(np.float64)) - np.array(b, dtype=(np.float64))) ** 2
+    ).sum()
 
 
 def rs_random(choices, k, seed=123):
@@ -209,13 +259,23 @@ def rs_iterative_random(reviewers, k):
     return selected
 
 
-def crs_greedy(sentiment, item, reviewers, k):
+def crs_greedy(
+    sentiment,
+    item,
+    reviewers,
+    k,
+    opinion_type="binary",
+):
     """
     item: item_id
     reviewers: user ids that wrote review on item, for retrieve review/sentiment purpose
     """
     aspect_id_map = get_aspect_id_map(sentiment, [item])
-    _, target_opinion_vector = get_aspect_opinion_vectors(aspect_id_map, get_item_aspect_sentiments(sentiment, item))
+    _, target_opinion_vector = get_aspect_opinion_vectors(
+        aspect_id_map,
+        get_item_aspect_sentiments(sentiment, item),
+        opinion_type=opinion_type,
+    )
     selected = []
     current_aspect_sentiments = []
     remaining_reviewers = reviewers.copy()
@@ -223,8 +283,14 @@ def crs_greedy(sentiment, item, reviewers, k):
         selected_reviewer = None
         min_cost = 1e9
         for reviewer in remaining_reviewers:
-            t_aspect_sentiments = get_aspect_sentiments(sentiment, item, [reviewer], current_aspect_sentiments)
-            _, t_opinion_vector = get_aspect_opinion_vectors(aspect_id_map, t_aspect_sentiments)
+            t_aspect_sentiments = get_aspect_sentiments(
+                sentiment, item, [reviewer], current_aspect_sentiments
+            )
+            _, t_opinion_vector = get_aspect_opinion_vectors(
+                aspect_id_map,
+                t_aspect_sentiments,
+                opinion_type=opinion_type,
+            )
             d_opinion = distance(target_opinion_vector, t_opinion_vector)
             if d_opinion < min_cost:
                 selected_reviewer = reviewer
@@ -238,14 +304,30 @@ def crs_greedy(sentiment, item, reviewers, k):
     return selected
 
 
-def rs_greedy(sentiment, target_item, item, reviewers, k, ld=1.0):
+def rs_greedy(
+    sentiment,
+    target_item,
+    item,
+    reviewers,
+    k,
+    ld=1.0,
+    opinion_type="binary",
+):
     """
     item: item_id
     reviewers: user ids that wrote review on item, for retrieve review/sentiment purpose
     """
     aspect_id_map = get_aspect_id_map(sentiment, [target_item, item])
-    target_aspect_vector, _ = get_aspect_opinion_vectors(aspect_id_map, get_item_aspect_sentiments(sentiment, target_item))
-    _, target_opinion_vector = get_aspect_opinion_vectors(aspect_id_map, get_item_aspect_sentiments(sentiment, item))
+    target_aspect_vector, _ = get_aspect_opinion_vectors(
+        aspect_id_map,
+        get_item_aspect_sentiments(sentiment, target_item),
+        opinion_type=opinion_type,
+    )
+    _, target_opinion_vector = get_aspect_opinion_vectors(
+        aspect_id_map,
+        get_item_aspect_sentiments(sentiment, item),
+        opinion_type=opinion_type,
+    )
     selected = []
     current_aspect_sentiments = []
     remaining_reviewers = reviewers.copy()
@@ -253,8 +335,14 @@ def rs_greedy(sentiment, target_item, item, reviewers, k, ld=1.0):
         selected_reviewer = None
         min_cost = 1e9
         for user in remaining_reviewers:
-            t_aspect_sentiments = get_aspect_sentiments(sentiment, item, [user], current_aspect_sentiments)
-            t_aspect_vector, t_opinion_vector = get_aspect_opinion_vectors(aspect_id_map, t_aspect_sentiments)
+            t_aspect_sentiments = get_aspect_sentiments(
+                sentiment, item, [user], current_aspect_sentiments
+            )
+            t_aspect_vector, t_opinion_vector = get_aspect_opinion_vectors(
+                aspect_id_map,
+                t_aspect_sentiments,
+                opinion_type=opinion_type,
+            )
             d_aspect = distance(target_aspect_vector, t_aspect_vector)
             d_opinion = distance(target_opinion_vector, t_opinion_vector)
             total_cost = ld * ld * d_aspect + d_opinion
@@ -270,16 +358,34 @@ def rs_greedy(sentiment, target_item, item, reviewers, k, ld=1.0):
     return selected
 
 
-def crs_integer_regression(sentiment, item, reviewers, k):
+def crs_integer_regression(
+    sentiment,
+    item,
+    reviewers,
+    k,
+    opinion_type="binary",
+):
     aspect_id_map = get_aspect_id_map(sentiment, [item])
-    _, target_opinion_vector = get_aspect_opinion_vectors(aspect_id_map, get_item_aspect_sentiments(sentiment, item))
+    _, target_opinion_vector = get_aspect_opinion_vectors(
+        aspect_id_map,
+        get_item_aspect_sentiments(sentiment, item),
+        opinion_type=opinion_type,
+    )
     vector_review_id = defaultdict()
     for reviewer in reviewers:
-        _, opinion_vector = get_aspect_opinion_vectors(aspect_id_map, get_aspect_sentiments(sentiment, item, [reviewer]))
-        reviewer_ids = vector_review_id.setdefault(tuple(opinion_vector.nonzero()[0]), [])
+        _, opinion_vector = get_aspect_opinion_vectors(
+            aspect_id_map,
+            get_aspect_sentiments(sentiment, item, [reviewer]),
+            opinion_type=opinion_type,
+        )
+        reviewer_ids = vector_review_id.setdefault(
+            tuple(opinion_vector.nonzero()[0]), []
+        )
         reviewer_ids.append(reviewer)
 
-    R = np.zeros((len(vector_review_id), target_opinion_vector.shape[0]), dtype=(np.float64))
+    R = np.zeros(
+        (len(vector_review_id), target_opinion_vector.shape[0]), dtype=(np.float64)
+    )
     id_review_ids_map = []
     id_review_ids_count = []
     for inc, (tup, reviewer_ids) in enumerate(vector_review_id.items()):
@@ -289,6 +395,7 @@ def crs_integer_regression(sentiment, item, reviewers, k):
 
     id_review_ids_count = np.array(id_review_ids_count)
     min_cost = 1e9
+    selected = []
     result = omp(R.T, target_opinion_vector)
     x = result.coef
     t_indices = x.nonzero()[0]
@@ -307,7 +414,9 @@ def crs_integer_regression(sentiment, item, reviewers, k):
             else:
                 X = int(N - L)
                 (Nv - np.floor(Nv)).argsort()[:]
-                X_largest_indices, X_other_indices = ((-Nv + np.floor(Nv)).argsort())[:X], ((-Nv + np.floor(Nv)).argsort())[X:]
+                X_largest_indices, X_other_indices = ((-Nv + np.floor(Nv)).argsort())[
+                    :X
+                ], ((-Nv + np.floor(Nv)).argsort())[X:]
                 for idx in X_largest_indices:
                     s[t_indices[idx]] = np.ceil(Nv[idx])
 
@@ -328,6 +437,7 @@ def crs_integer_regression(sentiment, item, reviewers, k):
             _, opinion_vector = get_aspect_opinion_vectors(
                 aspect_id_map,
                 get_aspect_sentiments(sentiment, item, selected_reviewers),
+                opinion_type=opinion_type,
             )
             d_opinion = distance(target_opinion_vector, opinion_vector)
             if d_opinion < min_cost:
@@ -337,15 +447,31 @@ def crs_integer_regression(sentiment, item, reviewers, k):
     return selected
 
 
-def rs_integer_regression(sentiment, target_item, item, reviewers, k, ld=1.0):
+def rs_integer_regression(
+    sentiment,
+    target_item,
+    item,
+    reviewers,
+    k,
+    ld=1.0,
+    opinion_type="binary",
+):
     aspect_id_map = get_aspect_id_map(sentiment, [target_item, item])
-    target_aspect_vector, _ = get_aspect_opinion_vectors(aspect_id_map, get_item_aspect_sentiments(sentiment, target_item))
-    _, target_opinion_vector = get_aspect_opinion_vectors(aspect_id_map, get_item_aspect_sentiments(sentiment, item))
+    target_aspect_vector, _ = get_aspect_opinion_vectors(
+        aspect_id_map, get_item_aspect_sentiments(sentiment, target_item)
+    )
+    _, target_opinion_vector = get_aspect_opinion_vectors(
+        aspect_id_map, get_item_aspect_sentiments(sentiment, item)
+    )
     vector_review_id = defaultdict()
     for reviewer in reviewers:
-        aspect_vector, opinion_vector = get_aspect_opinion_vectors(aspect_id_map, get_aspect_sentiments(sentiment, item, [reviewer]))
+        aspect_vector, opinion_vector = get_aspect_opinion_vectors(
+            aspect_id_map, get_aspect_sentiments(sentiment, item, [reviewer])
+        )
         joined_vector = np.concatenate([aspect_vector, opinion_vector])
-        reviewer_ids = vector_review_id.setdefault(tuple(joined_vector.nonzero()[0]), [])
+        reviewer_ids = vector_review_id.setdefault(
+            tuple(joined_vector.nonzero()[0]), []
+        )
         reviewer_ids.append(reviewer)
 
     R = np.zeros(
@@ -383,7 +509,9 @@ def rs_integer_regression(sentiment, target_item, item, reviewers, k, ld=1.0):
             else:
                 X = int(N - L)
                 (Nv - np.floor(Nv)).argsort()[:]
-                X_largest_indices, X_other_indices = ((-Nv + np.floor(Nv)).argsort())[:X], ((-Nv + np.floor(Nv)).argsort())[X:]
+                X_largest_indices, X_other_indices = ((-Nv + np.floor(Nv)).argsort())[
+                    :X
+                ], ((-Nv + np.floor(Nv)).argsort())[X:]
                 for idx in X_largest_indices:
                     s[t_indices[idx]] = np.ceil(Nv[idx])
 
@@ -416,7 +544,17 @@ def rs_integer_regression(sentiment, target_item, item, reviewers, k, ld=1.0):
     return selected
 
 
-def select(sentiment, item, target_item=None, reviewers=[], algorithm="greedy-rs", k=1, ld=1.0, seed=None):
+def select(
+    sentiment,
+    item,
+    target_item=None,
+    reviewers=[],
+    algorithm="greedy-rs",
+    k=1,
+    ld=1.0,
+    seed=None,
+    opinion_type="binary",
+):
     from time import time
 
     start_time = time()
@@ -427,24 +565,64 @@ def select(sentiment, item, target_item=None, reviewers=[], algorithm="greedy-rs
         elif algorithm == "iterative-random":
             selected = rs_iterative_random(reviewers, k)
         elif algorithm == "greedy-crs":
-            selected = crs_greedy(sentiment, item, reviewers, k)
+            selected = crs_greedy(
+                sentiment, item, reviewers, k, opinion_type=opinion_type
+            )
         elif algorithm == "integer-regression-crs":
-            selected = crs_integer_regression(sentiment, item, reviewers, k)
+            selected = crs_integer_regression(
+                sentiment,
+                item,
+                reviewers,
+                k,
+                opinion_type=opinion_type,
+            )
         elif algorithm == "greedy-rs":
-            selected = rs_greedy(sentiment, target_item, item, reviewers, k, ld)
+            selected = rs_greedy(
+                sentiment,
+                target_item,
+                item,
+                reviewers,
+                k,
+                ld,
+                opinion_type=opinion_type,
+            )
         elif algorithm == "integer-regression-rs":
-            selected = rs_integer_regression(sentiment, target_item, item, reviewers, k, ld)
+            selected = rs_integer_regression(
+                sentiment,
+                target_item,
+                item,
+                reviewers,
+                k,
+                ld,
+                opinion_type=opinion_type,
+            )
     end_time = time()
     return {"selected": selected, "time": end_time - start_time}
 
 
-def urs_greedy(sentiment, target_item, items, k=1, ld=1.0, mu=1.0):
+def urs_greedy(
+    sentiment,
+    target_item,
+    items,
+    k=1,
+    ld=1.0,
+    mu=1.0,
+    opinion_type="binary",
+):
     all_items = [target_item] + items
     aspect_id_map = get_aspect_id_map(sentiment, all_items)
-    target_aspect_vector, _ = get_aspect_opinion_vectors(aspect_id_map, get_item_aspect_sentiments(sentiment, target_item))
+    target_aspect_vector, _ = get_aspect_opinion_vectors(
+        aspect_id_map,
+        get_item_aspect_sentiments(sentiment, target_item),
+        opinion_type=opinion_type,
+    )
     all_selected = []
     for inc, item in enumerate(all_items):
-        _, target_opinion_vector = get_aspect_opinion_vectors(aspect_id_map, get_item_aspect_sentiments(sentiment, item))
+        _, target_opinion_vector = get_aspect_opinion_vectors(
+            aspect_id_map,
+            get_item_aspect_sentiments(sentiment, item),
+            opinion_type=opinion_type,
+        )
         selected = []
         current_aspect_sentiments = []
         reviewers = list(sentiment.get(item, {}).keys())
@@ -453,15 +631,27 @@ def urs_greedy(sentiment, target_item, items, k=1, ld=1.0, mu=1.0):
             selected_reviewer = None
             min_cost = 1e9
             for user in remaining_reviewers:
-                t_aspect_sentiments = get_aspect_sentiments(sentiment, item, [user], current_aspect_sentiments)
-                t_aspect_vector, t_opinion_vector = get_aspect_opinion_vectors(aspect_id_map, t_aspect_sentiments)
+                t_aspect_sentiments = get_aspect_sentiments(
+                    sentiment, item, [user], current_aspect_sentiments
+                )
+                t_aspect_vector, t_opinion_vector = get_aspect_opinion_vectors(
+                    aspect_id_map,
+                    t_aspect_sentiments,
+                    opinion_type=opinion_type,
+                )
                 d_aspect = distance(target_aspect_vector, t_aspect_vector)
                 d_opinion = distance(target_opinion_vector, t_opinion_vector)
                 total_cost = ld * d_aspect + d_opinion
                 prev_items = all_items[:inc]
                 for p_item in prev_items:
-                    p_aspect_sentiments = get_aspect_sentiments(sentiment, p_item, [user], current_aspect_sentiments)
-                    p_aspect_vector, _ = get_aspect_opinion_vectors(aspect_id_map, p_aspect_sentiments)
+                    p_aspect_sentiments = get_aspect_sentiments(
+                        sentiment, p_item, [user], current_aspect_sentiments
+                    )
+                    p_aspect_vector, _ = get_aspect_opinion_vectors(
+                        aspect_id_map,
+                        p_aspect_sentiments,
+                        opinion_type=opinion_type,
+                    )
                     total_cost += mu * distance(t_aspect_vector, p_aspect_vector)
 
                 if total_cost < min_cost:
@@ -489,31 +679,62 @@ def urs_integer_regression(
     initial_selection=None,
     seed=None,
     shuffle=False,
+    opinion_type="binary",
 ):
     all_selected = []
     if initial_selection is None:
         reviewers = list(sentiment.get(target_item, {}).keys())
-        selected = rs_integer_regression(sentiment, target_item, target_item, reviewers, k, ld)
+        selected = rs_integer_regression(
+            sentiment,
+            target_item,
+            target_item,
+            reviewers,
+            k,
+            ld,
+            opinion_type=opinion_type,
+        )
         initial_selection = {}
         initial_selection[target_item] = selected
         for inc, comparison_item in enumerate(items):
             reviewers = list(sentiment.get(comparison_item, {}).keys())
-            selected = rs_integer_regression(sentiment, target_item, comparison_item, reviewers, k, ld)
+            selected = rs_integer_regression(
+                sentiment,
+                target_item,
+                comparison_item,
+                reviewers,
+                k,
+                ld,
+                opinion_type=opinion_type,
+            )
             initial_selection[comparison_item] = selected
 
-    assert len(initial_selection) == len(items) + 1, f"{len(initial_selection)} != {len(items) + 1} for {target_item}"
+    assert (
+        len(initial_selection) == len(items) + 1
+    ), f"{len(initial_selection)} != {len(items) + 1} for {target_item}"
     all_items = [target_item] + items
     all_items = [str(item) for item in all_items]
     aspect_id_map = get_aspect_id_map(sentiment, all_items)
-    target_aspect_vector, _ = get_aspect_opinion_vectors(aspect_id_map, get_item_aspect_sentiments(sentiment, target_item))
+    target_aspect_vector, _ = get_aspect_opinion_vectors(
+        aspect_id_map,
+        get_item_aspect_sentiments(sentiment, target_item),
+        opinion_type=opinion_type,
+    )
     aspect_vectors = []
     target_opinion_vectors = []
     for item in all_items:
-        _, target_opinion_vector = get_aspect_opinion_vectors(aspect_id_map, get_item_aspect_sentiments(sentiment, item))
+        _, target_opinion_vector = get_aspect_opinion_vectors(
+            aspect_id_map,
+            get_item_aspect_sentiments(sentiment, item),
+            opinion_type=opinion_type,
+        )
         target_opinion_vectors.append(target_opinion_vector)
         selected_reviewers = initial_selection[item]
         all_selected.append(selected_reviewers)
-        aspect_vector, _ = get_aspect_opinion_vectors(aspect_id_map, get_aspect_sentiments(sentiment, item, selected_reviewers))
+        aspect_vector, _ = get_aspect_opinion_vectors(
+            aspect_id_map,
+            get_aspect_sentiments(sentiment, item, selected_reviewers),
+            opinion_type=opinion_type,
+        )
         aspect_vectors.append(aspect_vector)
 
     shuffled_ids = list(range(len(all_items)))
@@ -527,15 +748,26 @@ def urs_integer_regression(
             vector_review_id = {}
             reviewers = list(sentiment.get(item, {}).keys())
             for reviewer in reviewers:
-                aspect_vector, opinion_vector = get_aspect_opinion_vectors(aspect_id_map, get_aspect_sentiments(sentiment, item, [reviewer]))
-                joined_vector = np.concatenate([aspect_vector, opinion_vector] + [aspect_vector for _ in range(len(all_items) - 1)])
-                reviewer_ids = vector_review_id.setdefault(tuple(joined_vector.nonzero()[0]), [])
+                aspect_vector, opinion_vector = get_aspect_opinion_vectors(
+                    aspect_id_map,
+                    get_aspect_sentiments(sentiment, item, [reviewer]),
+                    opinion_type=opinion_type,
+                )
+                joined_vector = np.concatenate(
+                    [aspect_vector, opinion_vector]
+                    + [aspect_vector for _ in range(len(all_items) - 1)]
+                )
+                reviewer_ids = vector_review_id.setdefault(
+                    tuple(joined_vector.nonzero()[0]), []
+                )
                 reviewer_ids.append(reviewer)
 
             R = np.zeros(
                 (
                     len(vector_review_id),
-                    target_aspect_vector.shape[0] + target_opinion_vector.shape[0] + target_aspect_vector.shape[0] * (len(all_items) - 1),
+                    target_aspect_vector.shape[0]
+                    + target_opinion_vector.shape[0]
+                    + target_aspect_vector.shape[0] * (len(all_items) - 1),
                 ),
                 dtype=(np.float64),
             )
@@ -548,13 +780,15 @@ def urs_integer_regression(
 
             R[
                 :,
-                target_aspect_vector.shape[0] : target_aspect_vector.shape[0] + target_opinion_vector.shape[0],
+                target_aspect_vector.shape[0] : target_aspect_vector.shape[0]
+                + target_opinion_vector.shape[0],
             ] *= ld
             R[:, target_aspect_vector.shape[0] + target_opinion_vector.shape[0] :] *= mu
             min_cost = 1e9
             selected = []
             target_vector = np.concatenate(
-                [target_aspect_vector, target_opinion_vector] + [av for inc, av in enumerate(aspect_vectors) if inc != sidx]
+                [target_aspect_vector, target_opinion_vector]
+                + [av for inc, av in enumerate(aspect_vectors) if inc != sidx]
             )
             result = omp(R.T, target_vector)
             x = result.coef
@@ -574,7 +808,9 @@ def urs_integer_regression(
                     else:
                         X = int(N - L)
                         (Nv - np.floor(Nv)).argsort()[:]
-                        X_largest_indices, X_other_indices = ((-Nv + np.floor(Nv)).argsort())[:X], ((-Nv + np.floor(Nv)).argsort())[X:]
+                        X_largest_indices, X_other_indices = (
+                            (-Nv + np.floor(Nv)).argsort()
+                        )[:X], ((-Nv + np.floor(Nv)).argsort())[X:]
                         for idx in X_largest_indices:
                             s[t_indices[idx]] = np.ceil(Nv[idx])
 
@@ -597,6 +833,7 @@ def urs_integer_regression(
                     aspect_vector, opinion_vector = get_aspect_opinion_vectors(
                         aspect_id_map,
                         get_aspect_sentiments(sentiment, item, selected_reviewers),
+                        opinion_type=opinion_type,
                     )
                     d_aspect = distance(target_aspect_vector, aspect_vector)
                     d_opinion = distance(target_opinion_vector, opinion_vector)
@@ -621,13 +858,22 @@ def unified_select(
     seed=None,
     shuffle=False,
     max_iter=1,
+    opinion_type="binary",
 ):
     from time import time
 
     start_time = time()
     all_selected = []
     if algorithm == "unified-greedy-rs":
-        all_selected = urs_greedy(sentiment, target_item, items, k=k, ld=ld, mu=mu)
+        all_selected = urs_greedy(
+            sentiment,
+            target_item,
+            items,
+            k=k,
+            ld=ld,
+            mu=mu,
+            opinion_type=opinion_type,
+        )
     elif algorithm == "unified-integer-regression-rs":
         all_selected = urs_integer_regression(
             sentiment,
@@ -640,6 +886,7 @@ def unified_select(
             initial_selection=initial_selection,
             seed=seed,
             shuffle=shuffle,
+            opinion_type=opinion_type,
         )
     end_time = time()
     return {"all_selected": all_selected, "time": end_time - start_time}
@@ -659,10 +906,13 @@ def solve_and_export(
     shuffle=False,
     max_iter=1,
     skip_exists=False,
+    opinion_type="binary",
 ):
     output_dir = os.path.join(save_dir, "/".join(target_item))
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, "{}.txt".format(target_item))
+    running_time_path = os.path.join(output_dir, "{}-time.txt".format(target_item))
+    total_running_time = 0
     if skip_exists:
         if os.path.exists(output_path):
             with open(output_path, "r") as f:
@@ -672,7 +922,9 @@ def solve_and_export(
     if "unified" in algorithm:
         initial_selection = None
         if initial_dir is not None:
-            initial_selection_path = os.path.join(initial_dir, "/".join(target_item), "{}.txt".format(target_item))
+            initial_selection_path = os.path.join(
+                initial_dir, "/".join(target_item), "{}.txt".format(target_item)
+            )
             if os.path.exists(initial_selection_path):
                 initial_selection = read_selection(initial_selection_path)
         res = unified_select(
@@ -687,22 +939,48 @@ def solve_and_export(
             seed=seed,
             shuffle=shuffle,
             max_iter=max_iter,
+            opinion_type=opinion_type,
         )
         all_items = [target_item] + comparison_items
         all_selected = res["all_selected"]
         with open(output_path, "w") as f:
             for inc, selected in enumerate(all_selected):
                 f.write("{},{}\n".format(all_items[inc], ",".join(selected)))
-
+        total_running_time += res["time"]
     else:
         reviewers = list(sentiment.get(target_item, {}).keys())
         with open(output_path, "w") as f:
-            res = select(sentiment, target_item, target_item, reviewers, algorithm, k, ld, seed)
+            res = select(
+                sentiment,
+                target_item,
+                target_item,
+                reviewers,
+                algorithm,
+                k,
+                ld,
+                seed,
+                opinion_type=opinion_type,
+            )
+            total_running_time += res["time"]
             f.write("{},{}\n".format(target_item, ",".join(res["selected"])))
             for inc, comparison_item in enumerate(comparison_items):
                 reviewers = list(sentiment.get(comparison_item, {}).keys())
-                c_res = select(sentiment, comparison_item, target_item, reviewers, algorithm, k, ld)
+                c_res = select(
+                    sentiment,
+                    comparison_item,
+                    target_item,
+                    reviewers,
+                    algorithm,
+                    k,
+                    ld,
+                    seed,
+                    opinion_type=opinion_type,
+                )
+                total_running_time += c_res["time"]
                 f.write("{},{}\n".format(comparison_item, ",".join(c_res["selected"])))
+
+    with open(running_time_path, "w") as f:
+        f.write("{}\n{}\n".format(total_running_time, len(comparison_items) + 1))
 
 
 if __name__ == "__main__":
@@ -736,4 +1014,5 @@ if __name__ == "__main__":
                 args.shuffle,
                 args.max_iter,
                 args.skip_exists,
+                args.opinion_type,
             )
