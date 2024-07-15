@@ -2,7 +2,7 @@
 
 This is the code for the paper:
 
-**[Selecting Comparative Sets of Reviews Across Multiple Items](https://lthoang.com/assets/publications/edbt25.pdf)**
+**[Selecting Comparative Sets of Reviews Across Multiple Items](https://doi.org/10.48786/edbt.2025.02)**
 <br>
 [Trung-Hoang Le](http://lthoang.com/) and [Hady W. Lauw](http://www.hadylauw.com/)
 <br>
