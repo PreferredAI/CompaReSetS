@@ -13,11 +13,18 @@ If you find the code and data useful in your research, please cite:
 
 ```
 @inproceedings{le2025selecting,
-  title     = {Selecting Comparative Sets of Reviews Across Multiple Items},
-  author    = {Le, Trung-Hoang and Lauw, Hady W.},
-  year      = {2025},
-  isbn      = {9783983180974},
-  booktitle = {Proceedings of the 27th International Conference on Extending Database Technology}
+  author       = {Trung{-}Hoang Le and Hady W. Lauw},
+  editor       = {Alkis Simitsis and Bettina Kemme and Anna Queralt and Oscar Romero and Petar Jovanovic},
+  title        = {Selecting Comparative Sets of Reviews Across Multiple Items},
+  booktitle    = {Proceedings 28th International Conference on Extending Database Technology, {EDBT} 2025, Barcelona, Spain, March 25-28, 2025},
+  pages        = {13--24},
+  publisher    = {OpenProceedings.org},
+  year         = {2025},
+  url          = {https://doi.org/10.48786/edbt.2025.02},
+  doi          = {10.48786/EDBT.2025.02},
+  timestamp    = {Fri, 12 Jul 2024 15:24:41 +0200},
+  biburl       = {https://dblp.org/rec/conf/edbt/LeL25.bib},
+  bibsource    = {dblp computer science bibliography, https://dblp.org}
 }
 ```
 
